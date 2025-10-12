@@ -14,6 +14,12 @@
         <button id="previewBtn" disabled>Preview CSV</button>
         <button id="downloadBtn" disabled>Download CSV</button>
       </div>
+      <div class="options">
+        <label for="filenameInput">Filename:</label>
+        <input id="filenameInput" type="text" value="apollo-scrape.csv" />
+        <label><input id="flattenCheckbox" type="checkbox" checked /> Flatten buttons into columns</label>
+        <label><input id="collectAllChk" type="checkbox" /> Collect all (auto-scroll)</label>
+      </div>
       <div id="status" class="status">Ready</div>
       <div id="preview" class="preview"></div>
     </div>

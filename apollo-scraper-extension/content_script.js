@@ -131,11 +131,60 @@
   // Listen for messages from popup
   chrome.runtime.onMessage.addListener((msg,sender,sendResponse)=>{
     if(msg && msg.action==='scrape'){
-      const rows = scrapeApollo()
-      const csv = buildCsv(rows)
-      sendResponse({csv,count:rows.length})
+      (async function(){
+        try{
+          if(msg.options && msg.options.collectAll){
+            await autoScrollList()
+          }
+        }catch(e){/* ignore */}
+        const rows = scrapeApollo()
+        const csv = buildCsv(rows)
+        sendResponse({csv,count:rows.length})
+      })()
+      // return true to indicate we'll call sendResponse asynchronously
+      return true
     }
   })
+
+  // Try to find a scrollable list container and auto-scroll until no new rows load
+  function findScrollableContainer(){
+    // common Apollo container candidates
+    const candidates = Array.from(document.querySelectorAll('[data-qa="people-list"], [data-testid="people-list"], .people-list, .people-list-container, tbody'))
+    for(const c of candidates){
+      if(c && c.scrollHeight && c.scrollHeight > c.clientHeight) return c
+    }
+    // fallback: largest scrollable element
+    const all = Array.from(document.querySelectorAll('div, section'))
+    let best = null
+    for(const el of all){
+      if(el.scrollHeight && el.scrollHeight > el.clientHeight){
+        if(!best || el.scrollHeight > best.scrollHeight) best = el
+      }
+    }
+    return best || document.scrollingElement || document.documentElement
+  }
+
+  function sleep(ms){ return new Promise(r=>setTimeout(r,ms)) }
+
+  async function autoScrollList(){
+    const container = findScrollableContainer()
+    if(!container) return
+    const maxIter = 60
+    let lastHeight = -1
+    let sameCount = 0
+    for(let i=0;i<maxIter;i++){
+      try{
+        container.scrollTo({top: container.scrollHeight, behavior:'auto'})
+      }catch(e){ container.scrollTop = container.scrollHeight }
+      await sleep(500)
+      const h = container.scrollHeight
+      if(h === lastHeight){ sameCount++ } else { sameCount = 0; lastHeight = h }
+      // stop if stable for 3 iterations
+      if(sameCount >= 3) break
+    }
+    // small extra wait to allow lazy content to render
+    await sleep(300)
+  }
 
   // Also expose a global scrape function for debugging
   window.__apolloScrape = function(){ const r=scrapeApollo(); return {rows:r,csv:buildCsv(r)} }
