@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Apollo Scraper</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="container">
+      <h2>Apollo List Scraper</h2>
+      <div class="controls">
+        <button id="scrapeBtn">Scrape current page</button>
+        <button id="previewBtn" disabled>Preview CSV</button>
+        <button id="downloadBtn" disabled>Download CSV</button>
+      </div>
+      <div id="status" class="status">Ready</div>
+      <div id="preview" class="preview"></div>
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>
