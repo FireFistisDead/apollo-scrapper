@@ -5,7 +5,7 @@ This extension scrapes Apollo people listing rows and LinkedIn links/buttons and
 Install
 - Open Chrome, go to chrome://extensions
 - Enable "Developer mode"
-- Click "Load unpacked" and select the folder: `C:\Users\Goku\Desktop\appify\apollo-scraper-extension`
+- Click "Load unpacked" and select the folder: `....\apollo-scraper-extension`
 
 Usage
 - Open Apollo people list page (e.g. https://app.apollo.io/people)
