@@ -19,8 +19,13 @@
         <input id="filenameInput" type="text" value="apollo-scrape.csv" />
         <label><input id="flattenCheckbox" type="checkbox" checked /> Flatten buttons into columns</label>
         <label><input id="collectAllChk" type="checkbox" /> Collect all (auto-scroll)</label>
+        <label><input id="clickEmailChk" type="checkbox" /> Click Access Email buttons</label>
       </div>
       <div id="status" class="status">Ready</div>
+      <div class="progressWrap">
+        <progress id="progressBar" value="0" max="100" style="width:100%"></progress>
+        <div style="display:flex;justify-content:space-between;font-size:12px;margin-top:4px"><div>Total rows: <span id="totalCount">0</span></div><div id="progressInfo"></div></div>
+      </div>
       <div id="preview" class="preview"></div>
     </div>
     <script src="popup.js"></script>
