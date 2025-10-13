@@ -1,6 +1,8 @@
 const scrapeBtn = document.getElementById('scrapeBtn')
 const previewBtn = document.getElementById('previewBtn')
 const downloadBtn = document.getElementById('downloadBtn')
+const progressBar = document.getElementById('progressBar')
+const totalCountEl = document.getElementById('totalCount')
 const status = document.getElementById('status')
 const preview = document.getElementById('preview')
 const filenameInput = document.getElementById('filenameInput')
@@ -36,8 +38,9 @@ scrapeBtn.addEventListener('click', async ()=>{
       files: ['content_script.js']
     })
     // ask content script to run; send options
-    const collectAll = document.getElementById('collectAllChk') && document.getElementById('collectAllChk').checked
-    const res = await chrome.tabs.sendMessage(tab.id, {action:'scrape', options:{collectAll}})
+  const collectAll = document.getElementById('collectAllChk') && document.getElementById('collectAllChk').checked
+  const clickEmail = document.getElementById('clickEmailChk') && document.getElementById('clickEmailChk').checked
+  const res = await chrome.tabs.sendMessage(tab.id, {action:'scrape', options:{collectAll, clickEmail}})
     if(!res || !res.csv){
       setStatus('No data found on this page')
       preview.innerHTML = '<div style="color:#999;font-size:12px">No rows found. Try scrolling to load more rows and run again.</div>'
@@ -61,6 +64,23 @@ scrapeBtn.addEventListener('click', async ()=>{
   }
 })
 
+// listen for progress messages from content script
+chrome.runtime.onMessage.addListener((msg,sender,sendResponse)=>{
+  try{
+    if(msg && msg.action==='scrape_progress'){
+      if(msg.stage==='scrape'){
+        setStatus('Scraping pages — page ' + (msg.page||'?') + ', total rows: ' + (msg.currentRows||0) + (msg.newRows?(' (+'+msg.newRows+')') : ''))
+        if(totalCountEl) totalCountEl.textContent = String(msg.currentRows||0)
+      }else if(msg.stage==='reveal'){
+        setStatus('Revealing emails — ' + (msg.current||0) + ' / ' + (msg.total||'?') + (msg.info?(' — '+msg.info):''))
+        if(progressBar && msg.total){
+          try{ progressBar.max = msg.total; progressBar.value = msg.current }catch(e){}
+        }
+      }
+    }
+  }catch(e){ }
+})
+
 previewBtn.addEventListener('click', ()=>{
   if(!lastCsv) return
   preview.innerHTML = ''
@@ -71,7 +91,7 @@ previewBtn.addEventListener('click', ()=>{
 
   // build formatted rows: base columns + flattened columns when requested
   const formatted = []
-  const headersOut = ['name','job_title','company','linkedin']
+  const headersOut = ['name','job_title','company','linkedin','email']
   // extra columns we'll try to extract from buttons_json: org (company link text), location, tags
   const extraCols = ['org_link','location','tags']
   if(flattenCheckbox && flattenCheckbox.checked){ headersOut.push(...extraCols) }
@@ -81,7 +101,8 @@ previewBtn.addEventListener('click', ()=>{
       name: r[0]||'',
       job_title: r[1]||'',
       company: r[2]||'',
-      linkedin: r[3]||''
+      linkedin: r[3]||'',
+      email: r[4]||''
     }
     const extra = {org_link:'',location:'',tags:''}
     if(btnIdx>=0 && r[btnIdx]){
@@ -98,7 +119,7 @@ previewBtn.addEventListener('click', ()=>{
         if(tags.length) extra.tags = tags.join('|')
       }catch(e){ }
     }
-    const rowOut = [base.name, base.job_title, base.company, base.linkedin]
+    const rowOut = [base.name, base.job_title, base.company, base.linkedin, base.email]
     if(flattenCheckbox && flattenCheckbox.checked) rowOut.push(extra.org_link, extra.location, extra.tags)
     formatted.push(rowOut)
   })
@@ -119,7 +140,9 @@ previewBtn.addEventListener('click', ()=>{
   })
   table.appendChild(tbody)
   preview.appendChild(table)
-  setStatus('Previewing first ' + Math.min(200, formatted.length) + ' rows')
+  // count found emails in preview
+  const foundEmails = formatted.reduce((acc,r)=> acc + ((r[4] && r[4].trim())?1:0), 0)
+  setStatus('Previewing first ' + Math.min(200, formatted.length) + ' rows — ' + foundEmails + ' emails found')
 })
 
 downloadBtn.addEventListener('click', ()=>{
@@ -127,13 +150,13 @@ downloadBtn.addEventListener('click', ()=>{
   // build download CSV according to flatten option
   const rows = parseCsv(lastCsv)
   const btnIdx = rows.headers.indexOf('buttons_json')
-  const headersOut = ['name','job_title','company','linkedin']
+  const headersOut = ['name','job_title','company','linkedin','email']
   const extraCols = ['org_link','location','tags']
   if(flattenCheckbox && flattenCheckbox.checked) headersOut.push(...extraCols)
 
   const lines = [headersOut.join(',')]
   rows.data.forEach(r=>{
-    const base = [r[0]||'', r[1]||'', r[2]||'', r[3]||'']
+    const base = [r[0]||'', r[1]||'', r[2]||'', r[3]||'', r[4]||'']
     let extra = []
     if(flattenCheckbox && flattenCheckbox.checked){
       let org='', loc='', tags=''
