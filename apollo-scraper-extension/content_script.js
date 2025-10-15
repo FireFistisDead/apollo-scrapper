@@ -97,6 +97,185 @@
 
   // ===================== Advanced Email Extraction (Credit-Free) =====================
   
+  // Extract emails from Apollo's internal state/cache (Apollo Client uses this)
+  function extractEmailsFromApolloState(){
+    const emails = []
+    try{
+      // Check for Apollo Client state
+      if(window.__APOLLO_STATE__){
+        console.log('[Apollo Scraper] 🔍 Found __APOLLO_STATE__ - extracting emails...')
+        const state = window.__APOLLO_STATE__
+        const searchState = (obj, depth = 0) => {
+          if(depth > 5 || !obj || typeof obj !== 'object') return
+          
+          // Look for person/contact objects
+          if(obj.email && typeof obj.email === 'string' && /@/.test(obj.email)){
+            const email = obj.email.trim()
+            if(!/no.?email|access|request|example\.com/i.test(email)){
+              emails.push({
+                email,
+                name: obj.name || obj.firstName || obj.fullName || '',
+                source: 'apollo_state',
+                raw: obj
+              })
+            }
+          }
+          
+          // Recursively search nested objects
+          Object.values(obj).forEach(val => searchState(val, depth + 1))
+        }
+        searchState(state)
+        console.log('[Apollo Scraper] 🎯 Found', emails.length, 'emails in Apollo state')
+      }
+      
+      // Check for Apollo Client instance
+      if(window.__APOLLO_CLIENT__){
+        console.log('[Apollo Scraper] 🔍 Found __APOLLO_CLIENT__ - extracting from cache...')
+        try{
+          const client = window.__APOLLO_CLIENT__
+          const cache = client.cache || client.store
+          if(cache){
+            const cacheData = cache.data || cache.store || cache
+            const searchCache = (obj, depth = 0) => {
+              if(depth > 5 || !obj || typeof obj !== 'object') return
+              if(obj.email && typeof obj.email === 'string' && /@/.test(obj.email)){
+                const email = obj.email.trim()
+                if(!/no.?email|access|request|example\.com/i.test(email)){
+                  emails.push({
+                    email,
+                    name: obj.name || obj.firstName || '',
+                    source: 'apollo_client',
+                    raw: obj
+                  })
+                }
+              }
+              Object.values(obj).forEach(val => searchCache(val, depth + 1))
+            }
+            searchCache(cacheData)
+            console.log('[Apollo Scraper] 🎯 Found', emails.length, 'emails in Apollo client cache')
+          }
+        }catch(e){
+          console.log('[Apollo Scraper] Error reading Apollo client:', e)
+        }
+      }
+      
+      // Search entire window object for person arrays (more aggressive)
+      console.log('[Apollo Scraper] 🔍 Scanning window object for person data...')
+      const searchWindow = (obj, depth = 0, path = 'window') => {
+        if(depth > 4 || !obj || typeof obj !== 'object') return
+        
+        // Check if this is an array of person objects
+        if(Array.isArray(obj) && obj.length > 0 && obj[0] && obj[0].email){
+          obj.forEach(person => {
+            if(person.email && typeof person.email === 'string' && /@/.test(person.email)){
+              const email = person.email.trim()
+              if(!/no.?email|access|request|example\.com/i.test(email)){
+                emails.push({
+                  email,
+                  name: person.name || person.firstName || '',
+                  source: 'window_object',
+                  path,
+                  raw: person
+                })
+              }
+            }
+          })
+        }
+        
+        // Continue searching nested objects
+        try{
+          Object.entries(obj).forEach(([key, val]) => {
+            if(typeof val === 'object' && val !== null && 
+               !key.startsWith('__react') && !key.startsWith('_react')){
+              searchWindow(val, depth + 1, path + '.' + key)
+            }
+          })
+        }catch(e){}
+      }
+      searchWindow(window, 0)
+      console.log('[Apollo Scraper] 🎯 Total found in window scan:', emails.length, 'emails')
+      
+    }catch(e){
+      console.log('[Apollo Scraper] Error in Apollo state extraction:', e)
+    }
+    return emails
+  }
+  
+  // Extract emails from IndexedDB (Apollo caches data here)
+  async function extractEmailsFromIndexedDB(){
+    const emails = []
+    try{
+      console.log('[Apollo Scraper] 🔍 Checking IndexedDB for cached emails...')
+      const dbs = await indexedDB.databases()
+      console.log('[Apollo Scraper] Found databases:', dbs.map(db => db.name))
+      
+      for(const dbInfo of dbs){
+        const dbName = dbInfo.name
+        // Look for Apollo-related databases
+        if(/apollo|cache|store|persist/i.test(dbName)){
+          console.log('[Apollo Scraper] 🔍 Opening database:', dbName)
+          try{
+            const db = await new Promise((resolve, reject) => {
+              const request = indexedDB.open(dbName)
+              request.onsuccess = () => resolve(request.result)
+              request.onerror = () => reject(request.error)
+            })
+            
+            const storeNames = Array.from(db.objectStoreNames)
+            console.log('[Apollo Scraper] Object stores:', storeNames)
+            
+            for(const storeName of storeNames){
+              try{
+                const transaction = db.transaction(storeName, 'readonly')
+                const store = transaction.objectStore(storeName)
+                const allData = await new Promise((resolve, reject) => {
+                  const request = store.getAll()
+                  request.onsuccess = () => resolve(request.result)
+                  request.onerror = () => reject(request.error)
+                })
+                
+                // Search for emails in the data
+                const searchData = (obj, depth = 0) => {
+                  if(depth > 5 || !obj || typeof obj !== 'object') return
+                  if(obj.email && typeof obj.email === 'string' && /@/.test(obj.email)){
+                    const email = obj.email.trim()
+                    if(!/no.?email|access|request|example\.com/i.test(email)){
+                      emails.push({
+                        email,
+                        name: obj.name || obj.firstName || '',
+                        source: 'indexeddb',
+                        db: dbName,
+                        store: storeName
+                      })
+                    }
+                  }
+                  if(Array.isArray(obj)){
+                    obj.forEach(item => searchData(item, depth + 1))
+                  }else{
+                    Object.values(obj).forEach(val => searchData(val, depth + 1))
+                  }
+                }
+                allData.forEach(item => searchData(item))
+                
+              }catch(e){
+                console.log('[Apollo Scraper] Error reading store', storeName, ':', e)
+              }
+            }
+            
+            db.close()
+          }catch(e){
+            console.log('[Apollo Scraper] Error opening database', dbName, ':', e)
+          }
+        }
+      }
+      
+      console.log('[Apollo Scraper] 🎯 Found', emails.length, 'emails in IndexedDB')
+    }catch(e){
+      console.log('[Apollo Scraper] Error accessing IndexedDB:', e)
+    }
+    return emails
+  }
+  
   // Extract emails from React component props (Apollo uses React)
   function extractEmailFromReactProps(element){
     if(!element) return null
@@ -241,6 +420,8 @@
     // gather all profile links; we'll dedupe by person id from the href
     let profileLinks = Array.from(document.querySelectorAll('a[href*="/people/"], a[href*="/person/"], a[href*="/profiles/"]'))
       .filter(l => l && l.offsetParent !== null)
+    
+    console.log('[Apollo Scraper] 🔍 DEBUG: Found', profileLinks.length, 'profile links')
 
     // map person id -> best link element
     const idMap = new Map()
@@ -286,9 +467,13 @@
       }catch(e){ container = link }
       containers.push({id, link, container})
     }
+    
+    console.log('[Apollo Scraper] 🔍 DEBUG: Built', containers.length, 'containers from profile links')
 
     if(containers.length===0){
+      console.log('[Apollo Scraper] 🔍 DEBUG: No containers found, trying fallback selectors...')
       const fallback = Array.from(document.querySelectorAll('[data-qa="people-list"] [data-qa="people-list-row"], [data-testid="people-row"], tbody tr, .people-list-item, .ProfileListItem'))
+      console.log('[Apollo Scraper] 🔍 DEBUG: Fallback found', fallback.length, 'elements')
       fallback.forEach(el=>containers.push({id:null, link:null, container:el}))
     }
 
@@ -317,32 +502,129 @@
           }
         }
         
-        if(!name) return // skip empty rows
+        if(!name){
+          console.log('[Apollo Scraper] ⚠️ DEBUG: Skipping row - no name found. Container:', el.tagName, el.className)
+          return // skip empty rows
+        }
 
-        // job title
+        // job title - ENHANCED for Apollo's current UI
         let job = ''
-        const jobSel = el.querySelector('[data-qa*="job"]') || el.querySelector('.job-title') || el.querySelector('.headline') || el.querySelector('.title') || el.querySelector('[aria-label*="title"]')
-        job = jobSel ? (jobSel.innerText||'').trim() : ''
+        
+        // Try various selectors for job title
+        const jobSelectors = [
+          '[data-qa*="job"]',
+          '[data-qa*="title"]',
+          '.job-title',
+          '.headline',
+          '.title',
+          '[aria-label*="title"]',
+          '[class*="job"]',
+          '[class*="title"]',
+          '[class*="headline"]'
+        ]
+        
+        for(const selector of jobSelectors){
+          try{
+            const jobEl = el.querySelector(selector)
+            if(jobEl){
+              const text = (jobEl.innerText||jobEl.textContent||'').trim()
+              // Make sure it's not the name or email
+              if(text && text !== name && !/@/.test(text) && text.length > 2){
+                job = text
+                break
+              }
+            }
+          }catch(e){}
+        }
         
         // If table row and no job found, try extracting from subsequent cells
         if(!job && el.tagName === 'TR'){
           const cells = Array.from(el.querySelectorAll('td, th'))
           if(cells.length > 1){
             // Second cell often contains job title
-            job = (cells[1]?.innerText||'').trim()
+            const cellText = (cells[1]?.innerText||'').trim()
+            if(cellText && cellText !== name && !/@/.test(cellText)){
+              job = cellText
+            }
           }
         }
+        
+        // Fallback: Look for any div/span with job-related class or nearby name link
+        if(!job && pair.link){
+          try{
+            let parent = pair.link.parentElement
+            for(let i=0; i<3 && parent; i++, parent=parent.parentElement){
+              const siblings = Array.from(parent.children||[])
+              for(const sib of siblings){
+                if(sib === pair.link || sib.contains(pair.link)) continue
+                const sibText = (sib.innerText||sib.textContent||'').trim()
+                // Check if this looks like a job title (not too long, not email, not name)
+                if(sibText && sibText !== name && !/@/.test(sibText) && sibText.length > 3 && sibText.length < 100){
+                  // Common job title patterns
+                  if(/\b(manager|director|engineer|developer|analyst|coordinator|specialist|lead|head|chief|officer|executive|consultant|designer|architect|admin|associate)\b/i.test(sibText)){
+                    job = sibText
+                    break
+                  }
+                }
+              }
+              if(job) break
+            }
+          }catch(e){}
+        }
 
-        // company
+        // company - ENHANCED for Apollo's current UI
         let company = ''
-        const compSel = el.querySelector('[data-qa*="company"]') || el.querySelector('.company') || el.querySelector('[data-qa*="org"]') || el.querySelector('[aria-label*="company"]')
-        company = compSel ? (compSel.innerText||'').trim() : ''
+        
+        // Try various selectors for company
+        const companySelectors = [
+          '[data-qa*="company"]',
+          '[data-qa*="org"]',
+          '[data-qa*="organization"]',
+          '.company',
+          '.organization',
+          '[aria-label*="company"]',
+          '[aria-label*="organization"]',
+          '[class*="company"]',
+          '[class*="organization"]',
+          'a[href*="/organizations/"]',
+          'a[href*="/company/"]'
+        ]
+        
+        for(const selector of companySelectors){
+          try{
+            const compEl = el.querySelector(selector)
+            if(compEl){
+              const text = (compEl.innerText||compEl.textContent||'').trim()
+              // Make sure it's not the name, job, or email
+              if(text && text !== name && text !== job && !/@/.test(text) && text.length > 1){
+                company = text
+                break
+              }
+            }
+          }catch(e){}
+        }
         
         // If table row and no company found, try extracting from third cell
         if(!company && el.tagName === 'TR'){
           const cells = Array.from(el.querySelectorAll('td, th'))
           if(cells.length > 2){
-            company = (cells[2]?.innerText||'').trim()
+            const cellText = (cells[2]?.innerText||'').trim()
+            if(cellText && cellText !== name && cellText !== job && !/@/.test(cellText)){
+              company = cellText
+            }
+          }
+        }
+        
+        // Fallback: Look for organization link in buttons array
+        if(!company && buttons){
+          for(const btn of buttons){
+            if(btn.href && /organizations?\//.test(btn.href)){
+              const btnText = (btn.text||'').trim()
+              if(btnText && btnText !== name && btnText !== job && btnText.length > 1){
+                company = btnText
+                break
+              }
+            }
           }
         }
 
@@ -469,9 +751,66 @@
 
     // Debug logging
     console.log('[Apollo Scraper] Extracted', rows.length, 'rows')
+    
+    // Show sample of extracted data (first 3 rows)
+    if(rows.length > 0){
+      console.log('[Apollo Scraper] 📊 Sample extracted data (first 3 rows):')
+      rows.slice(0, 3).forEach((r, idx) => {
+        console.log(`  Row ${idx + 1}:`, {
+          name: r.name,
+          job: r.job || '(empty)',
+          company: r.company || '(empty)',
+          linkedin: r.linkedin ? 'Yes' : 'No',
+          email: r.email || '(empty)'
+        })
+      })
+    }
+    
+    // Count statistics
     const emailCount = rows.filter(r => r.email && r.email.trim()).length
+    const jobCount = rows.filter(r => r.job && r.job.trim()).length
+    const companyCount = rows.filter(r => r.company && r.company.trim()).length
     const needsRevealCount = rows.filter(r => r.needsReveal).length
+    
     console.log('[Apollo Scraper] ✅ Found', emailCount, 'emails automatically (NO CREDITS USED)')
+    console.log('[Apollo Scraper] 📋 Found', jobCount, 'job titles')
+    console.log('[Apollo Scraper] 🏢 Found', companyCount, 'companies')
+    
+    // DIAGNOSTIC: Show sample "Access email" button HTML for debugging
+    if(emailCount === 0 && needsRevealCount > 0 && rows.length > 0){
+      const sampleRow = rows.find(r => r.needsReveal)
+      if(sampleRow && sampleRow.containerEl){
+        console.log('[Apollo Scraper] 🔍 DIAGNOSTIC: Sample "Access email" button HTML:')
+        const accessButtons = Array.from(sampleRow.containerEl.querySelectorAll('button, a, [role="button"]'))
+          .filter(btn => {
+            const text = (btn.innerText || btn.textContent || '').trim()
+            return /access.*email|show.*email|reveal.*email/i.test(text)
+          })
+        
+        if(accessButtons.length > 0){
+          const btn = accessButtons[0]
+          console.log('Button text:', btn.innerText || btn.textContent)
+          console.log('Button outerHTML:', btn.outerHTML)
+          console.log('Button parent outerHTML:', btn.parentElement?.outerHTML?.substring(0, 800))
+          console.log('All button attributes:')
+          Array.from(btn.attributes || []).forEach(attr => {
+            console.log('  -', attr.name, '=', attr.value)
+          })
+          
+          // Check for React event handlers
+          const btnKeys = Object.keys(btn)
+          console.log('React/Event handler keys:', btnKeys.filter(k => k.includes('react') || k.includes('event') || k.includes('click')))
+          
+          // Check for data in container
+          console.log('\nContainer data attributes:')
+          Array.from(sampleRow.containerEl.attributes || []).forEach(attr => {
+            if(attr.name.startsWith('data-')) {
+              console.log('  -', attr.name, '=', attr.value.substring(0, 200))
+            }
+          })
+        }
+      }
+    }
     
     // Log extraction methods used
     const reactEmails = rows.filter(r => r.email && r.emailSource === 'react').length
@@ -506,6 +845,70 @@
         }
       })
     }
+    
+    // ========== ADVANCED: Extract from Apollo State/Memory/IndexedDB ==========
+    console.log('[Apollo Scraper] 🚀 ADVANCED: Checking Apollo state, memory, and IndexedDB...')
+    
+    // 1. Extract from Apollo State
+    const apolloStateEmails = extractEmailsFromApolloState()
+    if(apolloStateEmails.length > 0){
+      console.log('[Apollo Scraper] 🎯 Found', apolloStateEmails.length, 'emails in Apollo state/memory')
+      let apolloMatchCount = 0
+      rows.forEach(row => {
+        if(!row.email && row.name){
+          const matchedApollo = apolloStateEmails.find(ae => {
+            if(!ae.name || !row.name) return false
+            const aeName = ae.name.toLowerCase()
+            const rowName = row.name.toLowerCase()
+            // Match by first name or full name
+            const rowFirstName = rowName.split(' ')[0]
+            const aeFirstName = aeName.split(' ')[0]
+            return rowFirstName && aeFirstName && rowFirstName === aeFirstName
+          })
+          if(matchedApollo){
+            row.email = matchedApollo.email
+            row.emailSource = 'apollo_state'
+            apolloMatchCount++
+            console.log('[Apollo Scraper] 🎯 Matched Apollo state email for', row.name, ':', matchedApollo.email)
+          }
+        }
+      })
+      if(apolloMatchCount > 0){
+        console.log('[Apollo Scraper] ✅ Enriched', apolloMatchCount, 'emails from Apollo state (NO CREDITS!)')
+      }
+    }
+    
+    // 2. Extract from IndexedDB (async)
+    extractEmailsFromIndexedDB().then(indexedDBEmails => {
+      if(indexedDBEmails.length > 0){
+        console.log('[Apollo Scraper] 🎯 Found', indexedDBEmails.length, 'emails in IndexedDB')
+        let dbMatchCount = 0
+        rows.forEach(row => {
+          if(!row.email && row.name){
+            const matchedDB = indexedDBEmails.find(dbe => {
+              if(!dbe.name || !row.name) return false
+              const dbeName = dbe.name.toLowerCase()
+              const rowName = row.name.toLowerCase()
+              const rowFirstName = rowName.split(' ')[0]
+              const dbeFirstName = dbeName.split(' ')[0]
+              return rowFirstName && dbeFirstName && rowFirstName === dbeFirstName
+            })
+            if(matchedDB){
+              row.email = matchedDB.email
+              row.emailSource = 'indexeddb'
+              dbMatchCount++
+              console.log('[Apollo Scraper] 🎯 Matched IndexedDB email for', row.name, ':', matchedDB.email)
+            }
+          }
+        })
+        if(dbMatchCount > 0){
+          console.log('[Apollo Scraper] ✅ Enriched', dbMatchCount, 'emails from IndexedDB (NO CREDITS!)')
+        }
+      }
+    }).catch(e => {
+      console.log('[Apollo Scraper] IndexedDB extraction error:', e)
+    })
+    // ==================================================================
     
     if(rows.length > 0 && emailCount === 0 && needsRevealCount === 0){
       console.log('[Apollo Scraper] ⚠️ No emails found - Apollo may have changed UI or emails are deeply hidden')
@@ -632,6 +1035,88 @@
     try{
       const emailRegex = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i
       
+      // 0) FIRST: Check Apollo's specific "Access email" button structure for hidden email data
+      // Based on user's HTML: <button data-cta-variant="secondary" ...><span>Access email</span></button>
+      try{
+        // Find all buttons with "Access email" text
+        const accessButtons = Array.from(rowEl.querySelectorAll('button, a, [role="button"]'))
+          .filter(btn => {
+            const text = (btn.innerText || btn.textContent || '').trim()
+            return /access.*email|show.*email|reveal.*email/i.test(text)
+          })
+        
+        for(const btn of accessButtons){
+          // Check if email is stored in any data attribute on the button
+          const btnAttrs = Array.from(btn.attributes || [])
+          for(const attr of btnAttrs){
+            const attrVal = attr.value || ''
+            // Check for email patterns in ALL attributes
+            if(emailRegex.test(attrVal)){
+              const match = attrVal.match(emailRegex)
+              if(match && !/no.?email|request|access|example\.com/i.test(match[0])){
+                console.log('[Apollo Scraper] 🎯 Found email in button attribute:', attr.name, '=', match[0])
+                return match[0]
+              }
+            }
+          }
+          
+          // Check parent elements of the button (sometimes email is stored on container)
+          let parent = btn.parentElement
+          for(let i = 0; i < 3 && parent; i++){
+            const parentAttrs = Array.from(parent.attributes || [])
+            for(const attr of parentAttrs){
+              const attrVal = attr.value || ''
+              if(emailRegex.test(attrVal)){
+                const match = attrVal.match(emailRegex)
+                if(match && !/no.?email|request|access|example\.com/i.test(match[0])){
+                  console.log('[Apollo Scraper] 🎯 Found email in button parent attribute:', attr.name, '=', match[0])
+                  return match[0]
+                }
+              }
+            }
+            parent = parent.parentElement
+          }
+          
+          // Check sibling elements (email might be in hidden span next to button)
+          const siblings = Array.from(btn.parentElement?.children || [])
+          for(const sibling of siblings){
+            if(sibling === btn) continue
+            const siblingText = (sibling.innerText || sibling.textContent || '').trim()
+            if(emailRegex.test(siblingText)){
+              const match = siblingText.match(emailRegex)
+              if(match && !/no.?email|request|access|example\.com/i.test(match[0])){
+                console.log('[Apollo Scraper] 🎯 Found email in button sibling:', match[0])
+                return match[0]
+              }
+            }
+            // Check sibling attributes
+            const sibAttrs = Array.from(sibling.attributes || [])
+            for(const attr of sibAttrs){
+              const attrVal = attr.value || ''
+              if(emailRegex.test(attrVal)){
+                const match = attrVal.match(emailRegex)
+                if(match && !/no.?email|request|access|example\.com/i.test(match[0])){
+                  console.log('[Apollo Scraper] 🎯 Found email in button sibling attribute:', match[0])
+                  return match[0]
+                }
+              }
+            }
+          }
+          
+          // Check for onclick/data-onclick handlers that might contain email
+          const onclick = btn.getAttribute('onclick') || btn.getAttribute('data-onclick') || ''
+          if(emailRegex.test(onclick)){
+            const match = onclick.match(emailRegex)
+            if(match && !/no.?email|request|access|example\.com/i.test(match[0])){
+              console.log('[Apollo Scraper] 🎯 Found email in onclick handler:', match[0])
+              return match[0]
+            }
+          }
+        }
+      }catch(e){
+        console.log('[Apollo Scraper] Error checking Access email button:', e)
+      }
+      
       // 1) mailto anchors inside row
       const mailAnchors = Array.from(rowEl.querySelectorAll('a[href^="mailto:"]'))
       for(const a of mailAnchors){ 
@@ -717,6 +1202,55 @@
           if(!/no.?email|request|access/i.test(match)) return match
         }
       }
+      
+      // 6) AGGRESSIVE: Scan the entire row's outerHTML for email patterns
+      // This catches emails that might be in HTML attributes, data-, or hidden fields
+      try{
+        const rowHTML = rowEl.outerHTML || ''
+        // Find all email patterns in the HTML source
+        const htmlEmailMatches = rowHTML.match(new RegExp(emailRegex.source, 'gi'))
+        if(htmlEmailMatches && htmlEmailMatches.length > 0){
+          // Filter out noise and return first valid email
+          for(const potentialEmail of htmlEmailMatches){
+            if(!/no.?email|request|access|reveal|example\.com|test\.com|placeholder|@apollo\.io/i.test(potentialEmail)){
+              console.log('[Apollo Scraper] 🎯 Found email in raw HTML:', potentialEmail)
+              return potentialEmail
+            }
+          }
+        }
+      }catch(e){}
+      
+      // 7) Check for hidden input fields that might contain email
+      try{
+        const hiddenInputs = Array.from(rowEl.querySelectorAll('input[type="hidden"], input[style*="display:none"], input[style*="display: none"]'))
+        for(const input of hiddenInputs){
+          const inputValue = input.value || input.getAttribute('value') || ''
+          if(emailRegex.test(inputValue)){
+            const match = inputValue.match(emailRegex)
+            if(match && !/no.?email|request|access|example\.com/i.test(match[0])){
+              console.log('[Apollo Scraper] 🎯 Found email in hidden input:', match[0])
+              return match[0]
+            }
+          }
+        }
+      }catch(e){}
+      
+      // 8) Check for email in CSS classes or IDs (sometimes encoded there)
+      try{
+        const allElems = Array.from(rowEl.querySelectorAll('*'))
+        for(const elem of allElems){
+          const className = elem.className || ''
+          const elemId = elem.id || ''
+          const combined = className + ' ' + elemId
+          if(emailRegex.test(combined)){
+            const match = combined.match(emailRegex)
+            if(match && !/no.?email|request|access|example\.com/i.test(match[0])){
+              console.log('[Apollo Scraper] 🎯 Found email in class/id:', match[0])
+              return match[0]
+            }
+          }
+        }
+      }catch(e){}
 
       // 6) check table cells if row is a table row (td/th elements contain revealed data)
       if(rowEl.tagName === 'TR'){
