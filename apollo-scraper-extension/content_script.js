@@ -10,6 +10,91 @@
     return s
   }
 
+  // ===================== Network interception (page context) =====================
+  // Inject a small script into the page to monkeypatch fetch and XHR so we can
+  // capture API responses (useful when data is loaded via XHR/GraphQL and not
+  // exposed in the DOM). The injected script posts messages to window, which
+  // the content script listens for.
+  function injectNetworkCapture(){
+    try{
+      // ask the background service worker to inject the page-level capture
+      // script into the page's main world. This avoids inline script and CSP
+      // restrictions because the scripting API can execute in the page context.
+      try{ chrome.runtime.sendMessage({action:'inject_page_capture'}) }catch(e){ }
+    }catch(e){ /* ignore injection errors */ }
+  }
+
+  // Store captured network responses (url -> array of text bodies)
+  const _capturedNetwork = new Map()
+  window.addEventListener('message', (ev)=>{
+    try{
+      const d = ev.data
+      if(d && d.__apolloNetCapture){
+        const url = String(d.url||'')
+        const body = typeof d.body === 'string' ? d.body : (d.body ? JSON.stringify(d.body) : '')
+        if(!_capturedNetwork.has(url)) _capturedNetwork.set(url, [])
+        _capturedNetwork.get(url).push(body)
+      }
+    }catch(e){}
+  }, false)
+
+  // Recursively search an object for person-like entries.
+  function findPersonObjects(node, out){
+    if(!node || typeof node !== 'object') return
+    if(Array.isArray(node)){
+      for(const el of node) findPersonObjects(el, out)
+      return
+    }
+    // heuristics: object with name/email/id fields
+    const keys = Object.keys(node).map(k=>k.toLowerCase())
+    const hasName = keys.some(k=>/name|first.?name|last.?name|full.?name/.test(k))
+    const hasEmail = keys.some(k=>/email/.test(k))
+    const hasId = keys.some(k=>/id|personid|contactid/.test(k))
+    if((hasName || hasEmail) && (hasId || hasEmail || hasName)){
+      out.push(node)
+      return
+    }
+    // otherwise walk deeper
+    for(const k in node) try{ findPersonObjects(node[k], out) }catch(e){}
+  }
+
+  // Parse captured responses and extract person rows
+  function getPersonsFromCapturedNetwork(){
+    const persons = []
+    try{
+      for(const [url, bodies] of _capturedNetwork.entries()){
+        // filter by relevant urls
+        if(!/people|contacts|graphql|search|profiles|records|v1/i.test(url)) continue
+        for(const txt of bodies){
+          if(!txt) continue
+          let j = null
+          try{ j = JSON.parse(txt) }catch(e){
+            // try to deserialize GraphQL-like text by extracting JSON substring
+            const m = txt.match(/\{[\s\S]*\}/)
+            if(m) try{ j = JSON.parse(m[0]) }catch(e){}
+          }
+          if(!j) continue
+          const found = []
+          findPersonObjects(j, found)
+          for(const p of found){
+            // build normalized row
+            const name = (p.name || p.fullName || (p.firstName && ((p.firstName||'') + ' ' + (p.lastName||''))) || p.title || '')
+            const job = p.title || p.role || p.job || ''
+            const company = p.company || p.org || p.organization || ''
+            const linkedin = p.linkedin || p.linkedinUrl || ''
+            const email = (p.email || p.emailAddress || (p.emails && p.emails[0]) || '')
+            persons.push({name: String(name||''), job: String(job||''), company: String(company||''), linkedin: String(linkedin||''), email: String(email||'')})
+          }
+        }
+      }
+    }catch(e){}
+    return persons
+  }
+
+  // Inject capture as soon as possible
+  try{ injectNetworkCapture() }catch(e){}
+  // ===========================================================================
+
   // Attempt to find list rows inside Apollo people listing.
   function scrapeApollo(){
     const rows = []
@@ -82,17 +167,46 @@
           const n = el.querySelector('a[href*="/people/"]') || el.querySelector('.name') || el.querySelector('[data-qa="name"]') || el.querySelector('a')
           name = n ? (n.innerText||'').trim() : ''
         }
+        
+        // If container is a table row, try extracting from cells directly (apollo-email-scraper approach)
+        if(!name && el.tagName === 'TR'){
+          const cells = Array.from(el.querySelectorAll('td, th'))
+          if(cells.length > 0){
+            // First cell often contains name
+            const firstCell = cells[0]
+            const nameLink = firstCell.querySelector('a')
+            name = nameLink ? (nameLink.innerText||'').trim() : (firstCell.innerText||'').trim()
+          }
+        }
+        
         if(!name) return // skip empty rows
 
         // job title
         let job = ''
         const jobSel = el.querySelector('[data-qa*="job"]') || el.querySelector('.job-title') || el.querySelector('.headline') || el.querySelector('.title') || el.querySelector('[aria-label*="title"]')
         job = jobSel ? (jobSel.innerText||'').trim() : ''
+        
+        // If table row and no job found, try extracting from subsequent cells
+        if(!job && el.tagName === 'TR'){
+          const cells = Array.from(el.querySelectorAll('td, th'))
+          if(cells.length > 1){
+            // Second cell often contains job title
+            job = (cells[1]?.innerText||'').trim()
+          }
+        }
 
         // company
         let company = ''
         const compSel = el.querySelector('[data-qa*="company"]') || el.querySelector('.company') || el.querySelector('[data-qa*="org"]') || el.querySelector('[aria-label*="company"]')
         company = compSel ? (compSel.innerText||'').trim() : ''
+        
+        // If table row and no company found, try extracting from third cell
+        if(!company && el.tagName === 'TR'){
+          const cells = Array.from(el.querySelectorAll('td, th'))
+          if(cells.length > 2){
+            company = (cells[2]?.innerText||'').trim()
+          }
+        }
 
         // linkedin
         let linkedin = ''
@@ -118,14 +232,112 @@
     return rows
   }
 
-  // Build CSV from rows
+  // Helper: Tolerant parser for malformed button JSON arrays
+  function parseLooseButtons(raw){
+    if(!raw || typeof raw !== 'string') return []
+    const out = []
+    try{
+      const blockRe = /\{([^}]*)\}/g
+      let m
+      while((m = blockRe.exec(raw))){
+        const block = m[1]
+        const obj = {text:'', href:'', aria:''}
+        const textMatch = block.match(/text\s*:\s*([^,}]+)/)
+        const hrefMatch = block.match(/href\s*:\s*([^,}]+)/)
+        const ariaMatch = block.match(/aria\s*:\s*([^,}]+)/)
+        if(textMatch) obj.text = String(textMatch[1]).trim().replace(/^"|"$/g,'')
+        if(hrefMatch) obj.href = String(hrefMatch[1]).trim().replace(/^"|"$/g,'')
+        if(ariaMatch) obj.aria = String(ariaMatch[1]).trim().replace(/^"|"$/g,'')
+        if(obj.text || obj.href || obj.aria) out.push(obj)
+      }
+      if(out.length === 0){
+        const hrefRe = /href\s*:\s*(https?:\/\/[^,\]\} ]+)/g
+        let hm
+        const hrefs = []
+        while((hm = hrefRe.exec(raw))){ hrefs.push(hm[1]) }
+        const textRe = /text\s*:\s*([^,\]\}]+)/g
+        let tm
+        const texts = []
+        while((tm = textRe.exec(raw))){ texts.push(tm[1].trim().replace(/^"|"$/g,'')) }
+        const n = Math.max(hrefs.length, texts.length)
+        for(let i=0;i<n;i++){ out.push({text: texts[i]||'', href: hrefs[i]||'', aria:''}) }
+      }
+    }catch(e){}
+    return out
+  }
+
+  // Helper: Smart title-case preserving acronyms
+  function smartTitleCase(s){
+    if(!s) return ''
+    return s.split(/(\s+)/).map(token=>{
+      if(!token.trim()) return token
+      if(/\d/.test(token) || /^[A-Z0-9&\/\-]+$/.test(token)) return token
+      const lower = token.toLowerCase()
+      return lower.charAt(0).toUpperCase() + lower.slice(1)
+    }).join('')
+  }
+
+  // Build CSV from rows with formatted columns (org_link, location, tags)
   function buildCsv(rows){
-    const headers = ['name','job_title','company','linkedin','email','buttons_json','data_attrs_json']
+    const headers = ['name','job_title','company','linkedin','email','org_link','location','tags']
     const lines = [headers.join(',')]
+    
     rows.forEach(r=>{
-      const buttonsJson = JSON.stringify(r.buttons||[]) 
-      const dataJson = JSON.stringify(r.dataAttrs||{})
-      const line = [csvEscape(r.name),csvEscape(r.job),csvEscape(r.company),csvEscape(r.linkedin),csvEscape(r.email||''),csvEscape(buttonsJson),csvEscape(dataJson)].join(',')
+      // Extract formatted fields from buttons/dataAttrs
+      let org_link = ''
+      let location = ''
+      let tags = ''
+
+      // Try to parse r.buttons as array
+      let btns = []
+      try{
+        if(Array.isArray(r.buttons)) btns = r.buttons
+        else if(typeof r.buttons === 'string'){
+          try{ btns = JSON.parse(r.buttons) }catch(e){ btns = parseLooseButtons(r.buttons) }
+        }
+      }catch(e){}
+
+      if(Array.isArray(btns) && btns.length){
+        // Extract org_link: find button with href containing /organizations/
+        const orgBtn = btns.find(b=> b.href && (String(b.href).includes('/#/organizations/') || String(b.href).includes('/organizations/')))
+        if(orgBtn && orgBtn.href) org_link = orgBtn.href
+
+        // Extract location: find button with text matching 'City, Country' pattern
+        const locBtn = btns.find(b=> b.text && /[A-Za-z]+,\s*[A-Za-z]/.test(b.text))
+        if(locBtn && locBtn.text) location = locBtn.text
+
+        // Extract tags: collect non-empty text values, filter noise, dedupe, limit to 6
+        const noiseTokens = /^(Access\s+email|N\/A|NA|No\s+email|Copy|View\s+in\s+Apollo|Open\s+profile|Email)$/i
+        const tagList = btns.filter(b=> b.text && b.text.trim().length>0 && b.text.length<40 && !noiseTokens.test(b.text.trim())).map(b=>b.text.trim())
+        const seen = new Set()
+        const deduped = []
+        for(const t of tagList){
+          const key = t.toLowerCase()
+          if(!seen.has(key)){
+            seen.add(key)
+            deduped.push(t)
+          }
+        }
+        // Remove location-like items from tags if they match location
+        try{
+          const locNorm = location.toLowerCase().replace(/\s+/g,' ').trim()
+          const finalTags = deduped.filter(t=> t.toLowerCase().replace(/\s+/g,' ').trim() !== locNorm)
+          tags = finalTags.slice(0,6).map(t=> t.length>60? t.slice(0,57)+'...': t).join('|')
+        }catch(e){ tags = deduped.slice(0,6).join('|') }
+      }
+
+      // Normalize fields
+      let job = (r.job||'').replace(/[\r\n]+/g,' ').replace(/\s+/g,' ').trim()
+      job = job.replace(/\b(N\/A|NA|No\s+email|Access\s+email)\b/gi,'').trim()
+      job = job.replace(/[\|\*\u00A0]+/g,' ').replace(/^[^\w\d]+|[^\w\d]+$/g,'').trim()
+      job = smartTitleCase(job)
+
+      let company = (r.company||'').replace(/[\r\n]+/g,' ').replace(/\s+/g,' ').trim()
+      company = smartTitleCase(company)
+
+      location = (location||'').replace(/[\r\n]+/g,', ').replace(/\s+,\s+/g,', ').replace(/\s+/g,' ').trim()
+
+      const line = [csvEscape(r.name),csvEscape(job),csvEscape(company),csvEscape(r.linkedin),csvEscape(r.email||''),csvEscape(org_link),csvEscape(location),csvEscape(tags)].join(',')
       lines.push(line)
     })
     return lines.join('\n')
@@ -135,11 +347,21 @@
   function extractHiddenEmail(rowEl, linkEl){
     try{
       const emailRegex = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i
+      
       // 1) mailto anchors inside row
       const mailAnchors = Array.from(rowEl.querySelectorAll('a[href^="mailto:"]'))
-      for(const a of mailAnchors){ const m = (a.getAttribute('href')||'').match(/mailto:([^?]+)/i); if(m && m[1]) return decodeURIComponent(m[1]) }
+      for(const a of mailAnchors){ 
+        const m = (a.getAttribute('href')||'').match(/mailto:([^?]+)/i)
+        if(m && m[1]) return decodeURIComponent(m[1])
+      }
 
-      // 2) any element with data attributes that include email
+      // 2) Scan ALL text content in the row (like apollo-email-scraper does)
+      // This catches emails that are already rendered/revealed in the DOM
+      const allText = rowEl.innerText || rowEl.textContent || ''
+      const emailMatch = allText.match(emailRegex)
+      if(emailMatch) return emailMatch[0]
+
+      // 3) any element with data attributes that include email
       const candidates = Array.from(rowEl.querySelectorAll('a, button, span, div'))
       for(const c of candidates){
         try{
@@ -155,17 +377,31 @@
           if(emailRegex.test(aria)) return aria.match(emailRegex)[0]
           const title = (c.getAttribute && c.getAttribute('title'))||''
           if(emailRegex.test(title)) return title.match(emailRegex)[0]
-          const txt = (c.innerText||'')
+          
+          // Check individual element text (more granular than full row text)
+          const txt = (c.innerText||'').trim()
           if(emailRegex.test(txt)) return txt.match(emailRegex)[0]
         }catch(e){}
       }
 
-      // 3) data attributes on the row itself
+      // 4) data attributes on the row itself
       for(const a of Array.from(rowEl.attributes||[])){
         if(/email|mailto|contact/i.test(a.name) && a.value && emailRegex.test(a.value)) return a.value.match(emailRegex)[0]
       }
 
-      // 4) check immediately adjacent sibling elements (sometimes email shown in a sibling cell)
+      // 5) check table cells if row is a table row (td/th elements contain revealed data)
+      if(rowEl.tagName === 'TR'){
+        const cells = Array.from(rowEl.querySelectorAll('td, th'))
+        for(const cell of cells){
+          const cellText = (cell.innerText || cell.textContent || '').trim()
+          // Skip placeholder texts
+          if(/no\s+email|request.*mobile|n\/?a/i.test(cellText)) continue
+          const m = cellText.match(emailRegex)
+          if(m) return m[0]
+        }
+      }
+
+      // 6) check immediately adjacent sibling elements (sometimes email shown in a sibling cell)
       let parent = linkEl && linkEl.parentElement || rowEl
       for(let i=0;i<3 && parent;i++, parent = parent.parentElement){
         const text = (parent.innerText||'')
@@ -191,7 +427,27 @@
           }
           // simple path: optionally scroll to load virtual rows
           try{ if(msg.options && msg.options.collectAll) await autoScrollList(); else await sleep(200) }catch(e){}
-          const rows = scrapeApollo()
+          let rows = scrapeApollo()
+          // fallback: if no rows found, try table-based extraction (some UIs render a table)
+          if((!rows || rows.length===0)){
+            try{
+              const table = document.querySelector('table')
+              if(table){
+                const tableResult = buildCsvFromTable(table)
+                if(tableResult && tableResult.csv){ sendResponse({csv:tableResult.csv,count:tableResult.count}); return }
+              }
+            }catch(e){ /* ignore */ }
+            // next fallback: try to use captured network responses to build rows
+            try{
+              const netPersons = getPersonsFromCapturedNetwork()
+              if(netPersons && netPersons.length){
+                const csvLines = ['name,job_title,company,linkedin,email']
+                netPersons.forEach(p=> csvLines.push([csvEscape(p.name), csvEscape(p.job), csvEscape(p.company), csvEscape(p.linkedin), csvEscape(p.email)].join(',')))
+                sendResponse({csv: csvLines.join('\n'), count: netPersons.length})
+                return
+              }
+            }catch(e){ /* ignore */ }
+          }
           // if requested, click access-email buttons to reveal emails (sequential to avoid race)
           if(msg.options && msg.options.clickEmail){
             try{ await revealEmailsForRows(rows, {timeout:4000, delayBetween:250, progressHook: emailProgressHook}) }catch(e){ /* ignore individual errors */ }
@@ -204,6 +460,87 @@
       return true
     }
   })
+
+  // Table-based CSV builder modeled after the reference extension's logic.
+  // Clones the table, strips icons/buttons, sanitizes text, formats phones, and
+  // splits the "Name" column into First/Last/Full. Returns CSV (with BOM) and row count.
+  function buildCsvFromTable(tableEl){
+    try{
+      const clonedTable = tableEl.cloneNode(true)
+      // remove noisy elements
+      const elementsToRemove = clonedTable.querySelectorAll('svg, img, button, input[type="checkbox"]')
+      elementsToRemove.forEach(el=>{ try{ el.parentNode && el.parentNode.removeChild(el) }catch(e){} })
+
+      // prepare rows
+      const rows = Array.from(clonedTable.querySelectorAll('tr'))
+      if(!rows || rows.length===0) return null
+
+      let headerProcessed = false
+      let nameIndex = -1
+      let quickActionsIndex = -1
+      const lines = [ '\uFEFF' ] // BOM-prefixed CSV
+
+      for(const row of rows){
+        const cells = Array.from(row.querySelectorAll('th, td'))
+        if(!cells || cells.length===0) continue
+        const rowData = []
+
+        for(let i=0;i<cells.length;i++){
+          // header row handling
+          if(row === rows[0]){
+            if(!headerProcessed){
+              const txt = (cells[i].innerText||'').trim()
+              if(txt === 'Name') nameIndex = i
+              if(txt === 'Quick Actions') { quickActionsIndex = i; continue }
+            } else { continue }
+          }
+
+          if(i === quickActionsIndex) continue
+
+          let cellText = (cells[i].innerText||'')
+          // special Name column handling
+          if(i === nameIndex){
+            if(row === rows[0] && !headerProcessed){
+              rowData.push('"First Name"','"Last Name"','"Full Name"')
+            }else{
+              const names = cellText.trim().split(/\s+/)
+              const firstName = names[0] || ''
+              const lastName = names.slice(1).join(' ') || ''
+              const fullName = cellText.trim()
+              rowData.push('"'+firstName.replace(/"/g,'""')+'"','"'+lastName.replace(/"/g,'""')+'"','"'+fullName.replace(/"/g,'""')+'"')
+            }
+            continue
+          }
+
+          // normalize certain placeholder texts
+          if(cellText === 'No email' || cellText === 'Request Mobile Number' || cellText === 'NA') cellText = ' '
+
+          // phone formatting: match + followed by 11 digits and format roughly as in reference
+          try{
+            const phoneRegex = /\+(\d{1})(\d{3})(\d{3})(\d{4})/g
+            cellText = cellText.replace(phoneRegex, function(_, p1,p2,p3,p4){ return '+'+p1+' ('+p2+') '+p3+'-'+p4 })
+          }catch(e){}
+
+          // sanitize: remove non-printable and odd characters, remove U+00C2 artifacts
+          cellText = cellText.replace(/[^a-zA-Z0-9\s,.@-]/g, '').replace(/\u00c2/g, '')
+          cellText = cellText.replace(/"/g,'""').replace(/#/g,'').trim()
+          rowData.push('"'+cellText+'"')
+        }
+
+        // skip rows that are header-like
+        if(row !== rows[0] && rowData.length === 1 && rowData[0] && rowData[0].includes('Name')){
+          continue
+        }
+
+        lines.push(rowData.join(','))
+        if(row === rows[0]) headerProcessed = true
+      }
+
+      const csv = lines.join('\r\n')
+      const count = Math.max(0, lines.length - 1 - (headerProcessed ? 0 : 0))
+      return {csv, count}
+    }catch(e){ return null }
+  }
 
   // progress hook will send runtime messages back to popup
   function emailProgressHook(current, total, info){

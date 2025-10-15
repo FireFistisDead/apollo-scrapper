@@ -21,4 +21,12 @@
   "background": {
     "service_worker": "background.js"
   }
+  ,
+  "content_scripts": [
+    {
+      "matches": ["*://app.apollo.io/*","*://*.apollo.io/*"],
+      "js": ["page_capture.js"],
+      "run_at": "document_start"
+    }
+  ]
 }
