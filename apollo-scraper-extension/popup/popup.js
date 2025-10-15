@@ -153,9 +153,34 @@ scrapeBtn.addEventListener('click', async ()=>{
     }
     lastCsv = res.csv
     setStatus('Scrape complete — ' + res.count + ' rows')
-    if(res.count>0){
+    
+    // Show helpful message if no emails found
+    if(res.count > 0){
       previewBtn.disabled = false
       downloadBtn.disabled = false
+      
+      // Parse CSV to check email count
+      try{
+        const quickCheck = parseCsv(res.csv)
+        const emailIdx = quickCheck.headers.indexOf('email')
+        if(emailIdx >= 0){
+          const emailCount = quickCheck.data.filter(r => r[emailIdx] && r[emailIdx].trim() && r[emailIdx] !== 'No email').length
+          if(emailCount === 0){
+            setStatus('⚠️ Scrape complete — ' + res.count + ' rows, 0 emails (Enable "Click to reveal emails" to extract them)')
+            preview.innerHTML = '<div style="color:#ff9800;font-size:14px;padding:10px;background:#fff3e0;border-radius:4px;margin:10px 0;">' +
+              '<strong>⚠️ No emails found</strong><br><br>' +
+              'Emails are hidden behind "Access email" buttons.<br><br>' +
+              '<strong>Solution:</strong><br>' +
+              '1. Check ☑️ "Click to reveal emails" checkbox above<br>' +
+              '2. Click "Scrape Current Page" again<br>' +
+              '3. Wait for "Revealing emails" progress<br><br>' +
+              '<em>This will click buttons and extract emails (1-5 sec each)</em>' +
+              '</div>'
+          }
+        }
+      }catch(e){
+        // Ignore preview parsing errors
+      }
     }else{
       previewBtn.disabled = true
       downloadBtn.disabled = true
