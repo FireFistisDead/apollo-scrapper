@@ -1,6 +1,10 @@
 (function(){
   try{
-    const shouldCapture = (url) => /people|contacts|graphql|search|profiles|records|v1/i.test(String(url));
+    // Enhanced URL capture - catch MORE Apollo API patterns
+    const shouldCapture = (url) => {
+      const urlStr = String(url).toLowerCase();
+      return /people|contacts|graphql|search|profiles|records|person|email|organization|company|lead|prospect|api\/v[0-9]|mixed_people/i.test(urlStr);
+    };
     const origFetch = window.fetch;
     if(origFetch){
       window.fetch = function(input, init){
