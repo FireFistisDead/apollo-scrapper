@@ -615,6 +615,10 @@
           }
         }
         
+        // buttons (exclude profile link) - DECLARED HERE TO AVOID REFERENCE ERROR
+        const anchors = Array.from(el.querySelectorAll('a, button'))
+        const buttons = anchors.filter(a=>a && a!==pair.link).map(b=>({text:(b.innerText||'').trim(), aria:(b.getAttribute && b.getAttribute('aria-label'))||'', href:b.href||''}))
+        
         // Fallback: Look for organization link in buttons array
         if(!company && buttons){
           for(const btn of buttons){
@@ -632,10 +636,6 @@
         let linkedin = ''
         const li = el.querySelector('a[href*="linkedin.com"]') || el.querySelector('a[aria-label*="LinkedIn"]')
         if(li) linkedin = li.href || ''
-
-        // buttons (exclude profile link)
-        const anchors = Array.from(el.querySelectorAll('a, button'))
-        const buttons = anchors.filter(a=>a && a!==pair.link).map(b=>({text:(b.innerText||'').trim(), aria:(b.getAttribute && b.getAttribute('aria-label'))||'', href:b.href||''}))
 
         const dataAttrs = {}
         Array.from(el.attributes||[]).forEach(a=>{ if(a.name && a.name.startsWith('data-')) dataAttrs[a.name]=a.value })
@@ -1707,5 +1707,33 @@
 
   // Also expose a global scrape function for debugging
   window.__apolloScrape = function(){ const r=scrapeApollo(); return {rows:r,csv:buildCsv(r)} }
+
+  // ===================== API Integration for n8n =====================
+  // Listen for messages from background script (triggered by API server)
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg && msg.action === 'scrapeForAPI') {
+      try {
+        console.log('🌐 API scrape requested');
+        const rows = scrapeApollo();
+        const csv = buildCsv(rows);
+        
+        sendResponse({
+          type: 'scrapeComplete',
+          success: true,
+          rowCount: rows.length,
+          data: rows,
+          csv: csv
+        });
+      } catch (error) {
+        console.error('API scrape error:', error);
+        sendResponse({
+          type: 'scrapeComplete',
+          success: false,
+          error: error.message
+        });
+      }
+      return true; // Keep channel open for async response
+    }
+  });
 
 })();
